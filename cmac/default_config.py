@@ -1019,6 +1019,9 @@ _DEFAULT_CMAC_VALUES = {
         'rain_rate_a_coef_Kdp': 25.1,
         'rain_rate_b_coef_Kdp': 0.777,
         'kdp_method': "bringi",
+        # PhiDP system phase offset in degrees. None estimates it from
+        # each volume; set a number to pin it.
+        'phidp_sys_phase': None,
         'beam_width': 1.0,
         'radar_height_offset': 10.0,},  # We expect clutter corrected fields now
 

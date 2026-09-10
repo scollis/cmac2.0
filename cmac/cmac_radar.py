@@ -5,6 +5,7 @@ correct velocity and more. A new radar object is then created with all CMAC
 import copy
 import json
 import sys
+import warnings
 
 import xarray as xr
 import numpy as np
@@ -13,7 +14,7 @@ import netCDF4
 
 from .cmac_processing import (
     do_my_fuzz, get_melt, get_texture, fix_phase_fields, gen_clutter_field_from_refl, beam_block,
-    snow_rate, rain_rate)
+    snow_rate, rain_rate, get_sys_phase, remove_sys_phase)
 from .config import (get_cmac_values, get_field_names, get_metadata,
                      get_zs_relationships, get_default_metadata)
 from . import csu_kdp
@@ -336,6 +337,28 @@ def cmac(radar, sonde, config, geotiff=None, flip_velocity=False,
         fill_value = -9999.
         dp = radar.fields[field_config['input_phidp_field']]['data']
         dz = radar.fields[field_config['reflectivity']]['data'] 
+        # calc_kdp_bringi assumes PhiDP has the system phase offset removed
+        # and is already unfolded. Feeding it the raw phase carries the
+        # offset (~220 degrees at BNF) through to the Z-PHI attenuation,
+        # where it is read as propagation phase and inflates the specific
+        # attenuation by one to two orders of magnitude.
+        sys_phase = cmac_config.get('phidp_sys_phase', None)
+        if sys_phase is None:
+            sys_phase = get_sys_phase(
+                radar, gatefilter=kdp_gates,
+                phidp_field=field_config['input_phidp_field'],
+                ncp_field=field_config['normalized_coherent_power'],
+                rhv_field=field_config['cross_correlation_ratio'])
+        if sys_phase is None:
+            warnings.warn(
+                'Unable to estimate the PhiDP system phase offset; the raw '
+                'phase will be processed unchanged. Set phidp_sys_phase in '
+                'the configuration to supply it manually.', UserWarning)
+        else:
+            dp = remove_sys_phase(dp, sys_phase)
+            if verbose:
+                print('##    PhiDP system phase offset removed: '
+                      '%.2f degrees' % sys_phase)
         dp = dp.filled(fill_value)
         dz = dz.filled(fill_value)
         rng = np.tile(radar.range['data'], (radar.nrays, 1)) / 1e3
@@ -349,6 +372,8 @@ def cmac(radar, sonde, config, geotiff=None, flip_velocity=False,
         kdp = pyart.config.get_metadata("corrected_specific_differential_phase")
         phidp["data"] = phidp_data
         kdp["data"] = kdp_data
+        if sys_phase is not None:
+            phidp["system_phase_offset"] = np.round(sys_phase, 4)
         
 
     print("Processed phase")
@@ -417,22 +442,32 @@ def cmac(radar, sonde, config, geotiff=None, flip_velocity=False,
         radar, 'differential_phase',
         gatefilter=phase_proc_gates,
         size=cmac_config.get('phidp_despeckle_size', 49))
-    radar.fields['sounding_temperature_filled'] = copy.deepcopy(radar.fields['sounding_temperature'])
-    radar.fields['sounding_temperature_filled']['data'] = np.where(
-            radar.fields['sounding_temperature_filled']['data'] > -100.,
-            radar.fields['sounding_temperature_filled']['data'], 9999.)
+    # calculate_attenuation_zphi defaults to temp_ref='temperature', which
+    # ignores iso0_field altogether. Ask for the iso0 reference explicitly so
+    # that the height_over_iso0 field built above is what sets the melting
+    # layer, and fall back to the gate sounding temperature if the 0 degC
+    # level could not be located.
+    if np.isfinite(np.ma.filled(iso0, np.nan)):
+        temp_ref = 'height_over_iso0'
+        temp_field = None
+    else:
+        warnings.warn(
+            'Could not locate the 0 degC level in the sounding; falling back '
+            'to the gate sounding temperature to set the melting layer.',
+            UserWarning)
+        temp_ref = 'temperature'
+        temp_field = 'sounding_temperature'
     (spec_at, pia_dict, cor_z, spec_diff_at,
      pida_dict, cor_zdr) = pyart.correct.calculate_attenuation_zphi(
-         radar, temp_field='sounding_temperature_filled',
+         radar, temp_field=temp_field,
          zdr_field=field_config['zdr_field'],
          pia_field=field_config['pia_field'],
          iso0_field='height_over_iso0',
          phidp_field=field_config['phidp_field'],
          refl_field=field_config['refl_field'], c=c_coef, d=d_coef,
          a_coef=attenuation_a_coef, beta=beta_coef,
-         gatefilter=phase_proc_gates)
+         gatefilter=phase_proc_gates, temp_ref=temp_ref)
     #  cor_zdr['data'] += cmac_config['zdr_offset'] Now taken care of at start
-    del radar.fields['sounding_temperature_filled']
     radar.add_field('specific_attenuation', spec_at, replace_existing=True)
     radar.add_field('path_integrated_attenuation', pia_dict,
                     replace_existing=True)
@@ -443,6 +478,19 @@ def cmac(radar, sonde, config, geotiff=None, flip_velocity=False,
                     replace_existing=True)
     radar.add_field('corrected_differential_reflectivity', cor_zdr,
                     replace_existing=True)
+
+    # Py-ART's field metadata puts valid_min/valid_max on specific_attenuation
+    # but none on specific_differential_attenuation, so AH above the cap is
+    # silently masked on read while the ADP derived from that same AH is not.
+    # Set both, deriving the ADP bound from the AH bound through the
+    # ADP = c * AH ** d relation used to compute it, so the pair always masks
+    # the same gates.
+    ah_valid_max = float(cmac_config.get('specific_attenuation_valid_max', 1.0))
+    radar.fields['specific_attenuation']['valid_min'] = 0.0
+    radar.fields['specific_attenuation']['valid_max'] = ah_valid_max
+    radar.fields['specific_differential_attenuation']['valid_min'] = 0.0
+    radar.fields['specific_differential_attenuation']['valid_max'] = float(
+        np.round(c_coef * ah_valid_max ** d_coef, 4))
     
     radar.fields['corrected_velocity']['units'] = 'm/s'
     if 'valid_min' not in radar.fields['corrected_velocity'].keys():

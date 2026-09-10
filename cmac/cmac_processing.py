@@ -11,6 +11,7 @@ import fnmatch
 import netCDF4
 import numpy as np
 import pyart
+from pyart.correct.phase_proc import det_sys_phase, det_sys_phase_gf
 from scipy import integrate
 from scipy import ndimage, interpolate
 import skfuzzy as fuzz
@@ -334,6 +335,73 @@ def get_melt(radar, melt_cat=None, fzl_ceiling=5000.0,
     if fzl < fzl_floor:
         fzl = radar.gate_altitude['data'].min()
     return fzl
+
+def get_sys_phase(radar, gatefilter=None, phidp_field='differential_phase',
+                  ncp_field='normalized_coherent_power',
+                  rhv_field='copol_correlation_coeff', first_gate=30,
+                  n_gates=25, min_gates=10, min_rays=10):
+    """
+    Estimate the PhiDP system phase offset in degrees.
+
+    Takes the median PhiDP over the first n_gates meteorological gates of
+    each ray, then the median of those across rays. The median is used in
+    preference to the per-ray minimum that Py-ART's estimators take because
+    PhiDP here is noisy enough (gate to gate standard deviation of order 30
+    degrees) that a minimum sits well below the true offset.
+
+    The Py-ART estimators are kept as fallbacks. Both walk the rays of the
+    first sweep, so they raise IndexError on volumes whose
+    sweep_end_ray_index disagrees with the actual ray count, which is the
+    case for some of the BNF RHI files.
+
+    Returns None if no estimate can be made, in which case the caller should
+    leave PhiDP alone.
+
+    """
+    phidp = radar.fields[phidp_field]['data'][:, first_gate:]
+    if gatefilter is not None:
+        included = gatefilter.gate_included[:, first_gate:]
+    else:
+        included = ~np.ma.getmaskarray(phidp)
+
+    values = np.ma.filled(phidp, np.nan)
+    phases = []
+    for ray in range(values.shape[0]):
+        good = values[ray][included[ray] & np.isfinite(values[ray])]
+        if good.size >= min_gates:
+            phases.append(np.median(good[:n_gates]))
+    if len(phases) >= min_rays:
+        return float(np.median(phases))
+
+    for estimator in (
+            lambda: det_sys_phase_gf(radar, gatefilter,
+                                     phidp_field=phidp_field,
+                                     first_gate=int(first_gate)),
+            lambda: det_sys_phase(radar, ncp_field=ncp_field,
+                                  rhv_field=rhv_field,
+                                  phidp_field=phidp_field)):
+        try:
+            sys_phase = estimator()
+        except (KeyError, IndexError, ValueError, TypeError):
+            continue
+        if sys_phase is not None and np.isfinite(sys_phase):
+            return float(sys_phase)
+    return None
+
+
+def remove_sys_phase(phidp, sys_phase, wrap_min=-90.0):
+    """
+    Subtract the system phase offset from PhiDP and undo the 0-360 fold.
+
+    PhiDP is measured modulo 360, so subtracting the offset and taking the
+    remainder recovers the propagation phase in a single step. The result is
+    wrapped into [wrap_min, wrap_min + 360) rather than [0, 360) so that
+    noise about zero at close range stays slightly negative instead of
+    folding up to nearly 360 degrees.
+
+    """
+    return np.mod(phidp - sys_phase - wrap_min, 360.0) + wrap_min
+
 
 def fix_phase_fields(orig_kdp, orig_phidp, rrange, happy_kdp,
                      max_kdp=15.0):
