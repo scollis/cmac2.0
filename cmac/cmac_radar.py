@@ -637,6 +637,12 @@ def cmac(radar, sonde, config, geotiff=None, flip_velocity=False,
     if gate_id_meta is not None:
         radar.metadata['gate_id_temperature_source'] = str(
             gate_id_meta.get('temp_source'))
+        # Which generation of each moment the classifier actually saw. Every
+        # ARM volume publishes several candidates per moment, so this is not
+        # recoverable from the file without it.
+        radar.metadata['gate_id_classified_on'] = ', '.join(
+            '%s=%s' % (logical, source) for logical, source
+            in sorted(gate_id_meta.get('classified_on', {}).items()))
         radar.metadata['gate_id_no_evidence_gates'] = int(
             gate_id_meta['n_no_evidence'])
         if gate_id_meta.get('freezing_level_m') is not None:
