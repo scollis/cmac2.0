@@ -1359,6 +1359,12 @@ _DEFAULT_PROCESSING_TUNABLES = {
     # site with a sounding should use; pin a number only when the sounding is
     # known to be unrepresentative.
     'gate_id_freezing_level': None,
+    # Classification runs on the uncorrected moments where the volume
+    # publishes them (see gate_id_backends.UNCORRECTED_CANDIDATES). Those have
+    # not been through the in-place ref_offset/zdr_offset that cmac() applies
+    # to the configured fields, so the offsets are added to the classifier's
+    # view of them. Set false to classify on the raw instrument values.
+    'gate_id_apply_offsets': True,
     'gate_id_snr_min': 3.0,
     'gate_id_min_run': 3,
     'gate_id_despeckle_keep_dbz': 30.0,

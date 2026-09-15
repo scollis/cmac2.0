@@ -95,11 +95,9 @@ RADAR_PALETTE_TO_CMAC = {
 #: classification radar handed to ``radar_palette``. Each is a member of the
 #: matching ``radar_palette.gateid.features.FIELD_CANDIDATES`` list, and because
 #: the classification radar carries exactly one candidate per logical moment,
-#: resolution is unambiguous. This is what keeps CMAC's per-radar
-#: ``field_names`` configuration the single source of truth for field naming
-#: instead of letting the classifier's own preference order pick fields -- which
-#: on an ARM a1 file resolves to the ``uncorrected_*`` moments and would bypass
-#: the ZDR and reflectivity offsets ``cmac()`` has already applied.
+#: resolution is unambiguous rather than left to the classifier's own
+#: preference order. What that single candidate *contains* is decided by
+#: :data:`UNCORRECTED_CANDIDATES` below.
 CLASSIFICATION_FIELD_NAMES = {
     'z': 'reflectivity',
     'zdr': 'differential_reflectivity',
@@ -111,18 +109,48 @@ CLASSIFICATION_FIELD_NAMES = {
     'vel': 'mean_doppler_velocity',
 }
 
-#: Spectral-width field names to probe for when the radar config does not name
-#: one. CMAC's own classifier does not use spectrum width, so ``field_names``
-#: has historically had no key for it, but ``radar_palette`` weights it in the
-#: clutter, biological and second-trip classes -- dropping it measurably moves
-#: those counts. ``spectrum_width`` is Py-ART's name on MDV and NEXRAD volumes;
-#: ``spectral_width`` is modern ARM CfRadial.
-SPECTRAL_WIDTH_CANDIDATES = (
-    'spectral_width',
-    'spectrum_width',
-    'uncorrected_spectral_width_h',
-    'spectral_width_h',
-)
+#: Logical moment -> ordered names of the *uncorrected* moment on an ARM
+#: volume, tried before the per-radar ``field_names`` entry.
+#:
+#: Classification runs on uncorrected moments by convention: the unprefixed
+#: fields on an ARM ``a1`` volume have already had vendor processing applied
+#: -- clutter filtering, thresholding, and on the CACTI and TRACER generations
+#: attenuation correction -- and what that processing did differs across sites
+#: and instrument generations, while the uncorrected moments are the same
+#: measurement everywhere. Every ARM C-SAPR2 ``a1`` volume examined (BNF 2026,
+#: CACTI 2018, TRACER 2022) publishes the first six of these; NCP and SNR are
+#: published uncorrected only at BNF, and legacy platforms (MDV-era X-SAPR,
+#: NEXRAD) publish none of them, so each moment falls back to the name the
+#: radar's ``field_names`` config gives -- which keeps the config the single
+#: source of truth wherever the uncorrected moment does not exist.
+#:
+#: Spectrum width has no ``field_names`` key at all, because CMAC's own fuzzy
+#: classifier does not use it while ``radar_palette`` weights it in the
+#: clutter, biological and second-trip classes, so its fallbacks are listed
+#: here too: ``spectrum_width`` is Py-ART's name on MDV and NEXRAD volumes,
+#: ``spectral_width`` on modern ARM CfRadial.
+UNCORRECTED_CANDIDATES = {
+    'z': ('uncorrected_reflectivity_h', 'uncorrected_reflectivity'),
+    'zdr': ('uncorrected_differential_reflectivity',),
+    'rhohv': ('uncorrected_copol_correlation_coeff',
+              'uncorrected_cross_correlation_ratio'),
+    'ncp': ('uncorrected_normalized_coherent_power',),
+    'snr': ('uncorrected_signal_to_noise_ratio_copolar_h',
+            'uncorrected_signal_to_noise_ratio'),
+    'sw': ('uncorrected_spectral_width_h', 'uncorrected_spectral_width',
+           'spectral_width', 'spectrum_width'),
+    'phidp': ('uncorrected_differential_phase',),
+    'vel': ('uncorrected_mean_doppler_velocity_h',
+            'uncorrected_mean_doppler_velocity'),
+}
+
+#: Per-radar calibration offsets, and which logical moment each applies to.
+#: ``cmac()`` adds these in place to the *configured* reflectivity and ZDR
+#: fields before classification, so when this module substitutes the
+#: uncorrected moment it has to add them itself or the classifier would score
+#: an uncalibrated instrument. They are not applied when a moment falls back
+#: to the configured field, which ``cmac()`` has already offset.
+CALIBRATION_OFFSETS = {'z': 'ref_offset', 'zdr': 'zdr_offset'}
 
 #: Gate temperature below which ``sounding_temperature`` is treated as a fill
 #: value rather than a measurement. ``cmac()`` fills the masked entries of the
@@ -192,26 +220,44 @@ def sounding_freezing_level(radar, temperature_field='sounding_temperature',
     return float(radar.gate_altitude['data'][sub_freezing].min())
 
 
-def build_classification_radar(radar, field_config):
+def build_classification_radar(radar, field_config, cmac_config=None):
     """
     Return a shallow view of ``radar`` carrying only the moments to classify
     on, renamed to :data:`CLASSIFICATION_FIELD_NAMES`.
 
-    Two things this buys, both of which are the point of doing it at all:
+    Three things this does, all of them the point of doing it at all:
 
-    1. ``radar_palette.gateid.features.resolve_fields`` walks its own ordered
-       preference list per moment and prefers the ``uncorrected_*`` names. On an
-       ARM a1 volume those are present alongside the corrected ones, so the
-       classifier would silently score gates on reflectivity and ZDR that have
-       not had the per-radar ``ref_offset`` and ``zdr_offset`` applied -- while
-       every other CMAC product uses the offset fields. Publishing exactly one
-       candidate per moment, taken from the radar's own ``field_names`` config,
-       removes the ambiguity.
-    2. The sounding fill value is dropped (see ``_TEMPERATURE_FILL_FLOOR``).
+    1. Each moment is taken from the *uncorrected* field where the volume
+       publishes one (:data:`UNCORRECTED_CANDIDATES`), falling back to the
+       radar's ``field_names`` entry otherwise. Classification is a judgement
+       about what the instrument measured, so it runs on the measurement, not
+       on fields that carry vendor clutter filtering, thresholding or
+       attenuation correction whose definition varies by site and instrument
+       generation.
+    2. Exactly one candidate per logical moment is published, so
+       ``radar_palette.gateid.features.resolve_fields`` cannot silently pick a
+       different field than the one intended -- it walks its own ordered
+       preference list, which on an ARM a1 volume has several live options per
+       moment.
+    3. The per-radar calibration offsets are applied to the uncorrected
+       reflectivity and ZDR (:data:`CALIBRATION_OFFSETS`), because ``cmac()``
+       applies them in place to the *configured* fields and an uncorrected
+       moment has not been through that. The sounding fill value is dropped
+       (see ``_TEMPERATURE_FILL_FLOOR``).
 
     The returned object is a shallow copy: the geometry, instrument parameters
     and sweep metadata are shared with the caller's radar, and only ``fields``
     is replaced, so nothing here can perturb the volume being processed.
+
+    Parameters
+    ----------
+    radar : Radar
+        The volume being processed.
+    field_config : dict
+        Per-radar field-name mapping, from :func:`cmac.config.get_field_names`.
+    cmac_config : dict, optional
+        Per-radar processing values. Read for the calibration offsets and for
+        ``gate_id_apply_offsets``; when omitted, offsets are not applied.
 
     Returns
     -------
@@ -221,9 +267,13 @@ def build_classification_radar(radar, field_config):
         Names, on the returned view, of the *measured* moments -- the fields
         the evidence guard tests for finiteness. Gate temperature is not among
         them; that is the whole point of the guard.
+    resolved : dict
+        Logical moment -> the source field name actually used, so a caller can
+        report which generation of moment each site ended up classifying on.
 
     """
-    sources = {
+    cmac_config = {} if cmac_config is None else cmac_config
+    configured = {
         'z': field_config['reflectivity'],
         'zdr': field_config.get(
             'differential_reflectivity', field_config.get('input_zdr')),
@@ -236,19 +286,32 @@ def build_classification_radar(radar, field_config):
         'phidp': field_config['input_phidp_field'],
         'vel': field_config['velocity'],
     }
-    if sources['sw'] is None:
-        sources['sw'] = next(
-            (name for name in SPECTRAL_WIDTH_CANDIDATES if name in radar.fields),
-            None)
 
+    apply_offsets = cmac_config.get('gate_id_apply_offsets', True)
     fields = {}
     moment_fields = []
-    for logical, source in sources.items():
+    resolved = {}
+    for logical, fallback in configured.items():
+        source = next((name for name in UNCORRECTED_CANDIDATES[logical]
+                       if name in radar.fields), None)
+        is_uncorrected = source is not None
+        if source is None:
+            source = fallback
         if source is None or source not in radar.fields:
             continue
+
         target = CLASSIFICATION_FIELD_NAMES[logical]
-        fields[target] = radar.fields[source]
+        field = radar.fields[source]
+        offset_key = CALIBRATION_OFFSETS.get(logical)
+        offset = cmac_config.get(offset_key) if offset_key else None
+        if is_uncorrected and apply_offsets and offset:
+            # Copy first: the offset must not reach the volume being
+            # processed, which carries the offset on its own configured field.
+            field = dict(field)
+            field['data'] = field['data'] + offset
+        fields[target] = field
         moment_fields.append(target)
+        resolved[logical] = source
 
     # Gate temperature and height are derived, not measured, so they are
     # published for the classifier to use but deliberately left out of
@@ -261,7 +324,7 @@ def build_classification_radar(radar, field_config):
 
     classification_radar = copy.copy(radar)
     classification_radar.fields = fields
-    return classification_radar, moment_fields
+    return classification_radar, moment_fields, resolved
 
 
 def _no_evidence_mask(classification_radar, moment_fields):
@@ -356,6 +419,7 @@ def radar_palette_gate_id(radar, field_config, cmac_config, verbose=False):
     cmac_config : dict
         Per-radar processing values, from :func:`cmac.config.get_cmac_values`.
         Read here: ``gate_id_class_map``, ``gate_id_freezing_level``,
+        ``gate_id_apply_offsets``, ``ref_offset``, ``zdr_offset``,
         ``gate_id_snr_min``, ``gate_id_min_run``, ``gate_id_despeckle_keep_dbz``,
         ``gate_id_incoherent_frac``, ``gate_id_texture_window``,
         ``gate_id_publish_margin``.
@@ -381,10 +445,12 @@ def radar_palette_gate_id(radar, field_config, cmac_config, verbose=False):
     """
     entry_points, single = _import_radar_palette()
 
-    classification_radar, moment_fields = build_classification_radar(
-        radar, field_config)
+    classification_radar, moment_fields, resolved = build_classification_radar(
+        radar, field_config, cmac_config)
     if verbose:
-        print('##    classifying on: %s' % ', '.join(sorted(moment_fields)))
+        print('##    classifying on: %s'
+              % ', '.join('%s=%s' % (logical, source)
+                          for logical, source in sorted(resolved.items())))
 
     # None means "take the classifier's own default", which is not the same as
     # passing None through: that would switch the phase-coherence test off
@@ -485,6 +551,7 @@ def radar_palette_gate_id(radar, field_config, cmac_config, verbose=False):
             extra_fields['scatterer_classification_margin'] = margin
 
     meta = dict(meta)
+    meta['classified_on'] = resolved
     meta['n_no_evidence'] = n_no_evidence
     meta['fold_counts'] = fold_counts
     meta['freezing_level_m'] = freezing_level_m

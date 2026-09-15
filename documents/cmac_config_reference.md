@@ -261,6 +261,7 @@ radar needs to differ.
 |---|---|---|
 | `gate_id_class_map` | `null` | Class name -> CMAC category, overriding the default fold for the classes named. Partial maps are merged over the default. Targets must be one of `multi_trip`, `rain`, `snow`, `no_scatter`, `melting`. |
 | `gate_id_freezing_level` | `null` | Freezing level in m MSL for the melting-layer constraints. `null` derives it from the mapped sounding, which is what a site with a sounding should use. |
+| `gate_id_apply_offsets` | `true` | Add `ref_offset` / `zdr_offset` to the uncorrected moments the classifier sees. See [Gate-ID backends](#gate-id-backends). |
 | `gate_id_snr_min` | `3.0` | Gates below this SNR are forced to `no_scatter` before scoring. `null` disables the test. |
 | `gate_id_min_run` | `3` | Class runs shorter than this many gates along a ray are dissolved. |
 | `gate_id_despeckle_keep_dbz` | `30.0` | Reflectivity at or above which a gate is never despeckled or gated out. |
@@ -318,13 +319,30 @@ both that install and the `cmac_fuzzy` fallback.
 
 Two behaviours of this backend are CMAC's own and worth knowing about:
 
-- The classification input is built from the radar's `field_names` config
-  rather than from `radar_palette`'s internal field-name preference order,
-  which prefers the `uncorrected_*` moments. On an ARM `a1` volume those sit
-  alongside the corrected ones, so the classifier would otherwise score gates
-  on reflectivity and ZDR that had not had `ref_offset` and `zdr_offset`
-  applied. Spectrum width has no `field_names` key (CMAC's own classifier does
-  not use it, `radar_palette` does), so it is probed for by name; add a
+- **Classification runs on the uncorrected moments.** For each moment the
+  backend takes the `uncorrected_*` field where the volume publishes one —
+  `uncorrected_reflectivity_h`, `uncorrected_differential_reflectivity`,
+  `uncorrected_copol_correlation_coeff`, `uncorrected_differential_phase`,
+  `uncorrected_mean_doppler_velocity_h`, `uncorrected_spectral_width_h`, and
+  the uncorrected NCP and SNR where they exist — and falls back to the
+  radar's `field_names` entry otherwise. Deciding what the instrument saw is
+  a judgement about the measurement, and the unprefixed fields on an ARM `a1`
+  volume already carry vendor clutter filtering, thresholding and (on the
+  CACTI and TRACER generations) attenuation correction, whose definition
+  varies by site and instrument generation. Legacy platforms (MDV-era X-SAPR,
+  NEXRAD) publish no uncorrected moments, so there the config remains the
+  source of truth. Exactly one candidate per moment is handed to the
+  classifier, so its own internal preference order cannot pick a different
+  field. The field each moment resolved to is printed when `verbose=True`.
+- Because `cmac()` applies `ref_offset` and `zdr_offset` in place to the
+  *configured* reflectivity and ZDR, and an uncorrected moment has not been
+  through that, the backend adds those offsets to its own view of them —
+  calibration is a property of the instrument, not a correction. Set
+  `gate_id_apply_offsets: false` to classify on the raw values instead. A
+  moment that fell back to the configured field is never offset twice.
+- Spectrum width has no `field_names` key (CMAC's own classifier does not use
+  it, `radar_palette` does), so it is probed for by name — `spectrum_width`
+  on MDV and NEXRAD volumes, `spectral_width` on modern ARM CfRadial. Add a
   `spectral_width` key to `field_names` to pin it.
 - A gate with no finite *measured* moment cannot carry a hydrometeor label.
   The underlying classifier tests whether a feature is present rather than

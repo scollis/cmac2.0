@@ -79,32 +79,43 @@ def radar():
     radar.init_gate_altitude()
     shape = (radar.nrays, radar.ngates)
 
-    reflectivity = np.ma.masked_all(shape)
-    reflectivity[:, 1:] = 30.0
-    rhohv = np.ma.masked_all(shape)
-    rhohv[:, 1:] = 0.99
-    velocity = np.ma.masked_all(shape)
-    velocity[:, 1:] = 2.0
-    snr = np.ma.masked_all(shape)
-    snr[:, 1:] = 25.0
+    def measured(value):
+        """A moment measured everywhere except gate 0 of every ray."""
+        data = np.ma.masked_all(shape)
+        data[:, 1:] = value
+        return data
 
+    reflectivity = measured(30.0)
+    velocity = measured(2.0)
+    snr = measured(25.0)
+
+    # Each moment is published twice: the vendor-processed name and the
+    # uncorrected one, with values that differ enough for a test to tell which
+    # was used but stay in the same physical regime so the class a gate lands
+    # in does not depend on that choice.
     radar.add_field('reflectivity', _field(reflectivity, 'dBZ'))
-    # Same moment under the name radar_palette's resolver prefers, offset by
-    # 10 dB so a test can tell which one was used.
     radar.add_field('uncorrected_reflectivity_h',
                     _field(reflectivity - 10.0, 'dBZ'))
-    radar.add_field('copol_correlation_coeff', _field(rhohv))
+    radar.add_field('copol_correlation_coeff', _field(measured(0.99)))
     radar.add_field('uncorrected_copol_correlation_coeff',
-                    _field(rhohv * 0.5))
+                    _field(measured(0.985)))
     radar.add_field('differential_reflectivity',
-                    _field(np.ma.zeros(shape) + 0.5, 'dB'))
-    radar.add_field('normalized_coherent_power', _field(np.ma.zeros(shape) + 0.8))
-    radar.add_field('differential_phase', _field(np.ma.zeros(shape), 'deg'))
+                    _field(measured(0.5), 'dB'))
+    radar.add_field('uncorrected_differential_reflectivity',
+                    _field(measured(0.2), 'dB'))
+    radar.add_field('normalized_coherent_power', _field(measured(0.8)))
+    radar.add_field('differential_phase', _field(measured(0.0), 'deg'))
+    radar.add_field('uncorrected_differential_phase',
+                    _field(measured(1.0), 'deg'))
     radar.add_field('mean_doppler_velocity', _field(velocity, 'm/s'))
+    radar.add_field('uncorrected_mean_doppler_velocity_h',
+                    _field(velocity + 0.1, 'm/s'))
     radar.add_field('signal_to_noise_ratio_copolar_h', _field(snr, 'dB'))
     # cmac() copies the configured SNR field to this name before classifying.
     radar.add_field('signal_to_noise_ratio', _field(snr, 'dB'))
-    radar.add_field('spectral_width', _field(np.ma.zeros(shape) + 0.5, 'm/s'))
+    radar.add_field('spectral_width', _field(measured(0.5), 'm/s'))
+    radar.add_field('uncorrected_spectral_width_h',
+                    _field(measured(0.6), 'm/s'))
 
     # A profile that crosses 0 degC part-way up the volume, with cmac()'s
     # -9999 fill on the gates where the mapped sounding was masked.
@@ -177,19 +188,24 @@ def test_fold_rejects_an_unknown_class_name():
             np.zeros((1, 1), dtype='i2'), RADAR_PALETTE_CLASSES, class_map)
 
 
-def test_classification_radar_uses_the_configured_field_names(radar):
-    """The config, not the classifier's preference order, picks the fields."""
-    classification_radar, moment_fields = build_classification_radar(
+def test_classification_radar_prefers_the_uncorrected_moments(radar):
+    """Classification runs on the measurement, not the vendor-processed field.
+
+    The fixture's uncorrected reflectivity sits 10 dB below the unprefixed
+    field, so which one was used is visible in the values.
+    """
+    classification_radar, moment_fields, resolved = build_classification_radar(
         radar, FIELD_CONFIG)
 
-    # Exactly one candidate per logical moment, so resolution is unambiguous.
+    # Exactly one candidate per logical moment, so radar_palette's own
+    # preference order cannot pick a different field.
     assert 'uncorrected_reflectivity_h' not in classification_radar.fields
     assert 'uncorrected_copol_correlation_coeff' not in classification_radar.fields
-    # And it is the configured field, not the uncorrected one that sits 10 dB
-    # lower in the fixture.
+    assert resolved['z'] == 'uncorrected_reflectivity_h'
+    assert resolved['rhohv'] == 'uncorrected_copol_correlation_coeff'
     assert np.ma.allequal(
         classification_radar.fields['reflectivity']['data'],
-        radar.fields['reflectivity']['data'])
+        radar.fields['uncorrected_reflectivity_h']['data'])
 
     assert set(moment_fields) == {
         'reflectivity', 'differential_reflectivity', 'cross_correlation_ratio',
@@ -203,8 +219,63 @@ def test_classification_radar_uses_the_configured_field_names(radar):
     assert 'uncorrected_reflectivity_h' in radar.fields
 
 
+def test_classification_radar_falls_back_to_the_config(radar):
+    """Platforms with no uncorrected moment use the configured field.
+
+    Legacy X-SAPR (MDV) and NEXRAD volumes publish none of the uncorrected
+    names, so the per-radar field_names entry has to remain the fallback.
+    """
+    for name in ('uncorrected_reflectivity_h',
+                 'uncorrected_copol_correlation_coeff'):
+        del radar.fields[name]
+    classification_radar, _, resolved = build_classification_radar(
+        radar, FIELD_CONFIG)
+    assert resolved['z'] == 'reflectivity'
+    assert resolved['rhohv'] == 'copol_correlation_coeff'
+    assert np.ma.allequal(
+        classification_radar.fields['reflectivity']['data'],
+        radar.fields['reflectivity']['data'])
+
+
+def test_calibration_offsets_reach_the_uncorrected_moments(radar):
+    """cmac() offsets the configured fields, so this view offsets its own."""
+    cmac_config = {'ref_offset': 0.8, 'zdr_offset': 0.7}
+    classification_radar, _, _ = build_classification_radar(
+        radar, FIELD_CONFIG, cmac_config)
+    assert np.ma.allclose(
+        classification_radar.fields['reflectivity']['data'],
+        radar.fields['uncorrected_reflectivity_h']['data'] + 0.8)
+    assert np.ma.allclose(
+        classification_radar.fields['differential_reflectivity']['data'],
+        radar.fields['uncorrected_differential_reflectivity']['data'] + 0.7)
+    # The volume being processed must not see the offset twice.
+    assert np.ma.allequal(radar.fields['uncorrected_reflectivity_h']['data'],
+                          np.ma.masked_invalid(
+                              radar.fields['reflectivity']['data'] - 10.0))
+
+
+def test_calibration_offsets_not_applied_to_a_config_fallback(radar):
+    """A configured field has already been offset in place by cmac()."""
+    del radar.fields['uncorrected_reflectivity_h']
+    classification_radar, _, resolved = build_classification_radar(
+        radar, FIELD_CONFIG, {'ref_offset': 0.8})
+    assert resolved['z'] == 'reflectivity'
+    assert np.ma.allequal(
+        classification_radar.fields['reflectivity']['data'],
+        radar.fields['reflectivity']['data'])
+
+
+def test_calibration_offsets_can_be_switched_off(radar):
+    classification_radar, _, _ = build_classification_radar(
+        radar, FIELD_CONFIG,
+        {'ref_offset': 0.8, 'gate_id_apply_offsets': False})
+    assert np.ma.allequal(
+        classification_radar.fields['reflectivity']['data'],
+        radar.fields['uncorrected_reflectivity_h']['data'])
+
+
 def test_classification_radar_masks_the_sounding_fill(radar):
-    classification_radar, _ = build_classification_radar(radar, FIELD_CONFIG)
+    classification_radar, _, _ = build_classification_radar(radar, FIELD_CONFIG)
     temperature = classification_radar.fields['sounding_temperature']['data']
     assert np.ma.getmaskarray(temperature)[:, 0].all()
     assert not np.ma.getmaskarray(temperature)[:, 1:].any()
@@ -214,11 +285,13 @@ def test_classification_radar_masks_the_sounding_fill(radar):
 
 def test_classification_radar_probes_for_spectrum_width(radar):
     """Spectrum width is found even though field_names has no key for it."""
+    del radar.fields['uncorrected_spectral_width_h']
     radar.fields['spectrum_width'] = radar.fields.pop('spectral_width')
-    classification_radar, moment_fields = build_classification_radar(
+    classification_radar, moment_fields, resolved = build_classification_radar(
         radar, FIELD_CONFIG)
     assert 'spectral_width' in classification_radar.fields
     assert 'spectral_width' in moment_fields
+    assert resolved['sw'] == 'spectrum_width'
 
 
 def test_sounding_freezing_level_from_the_gate_profile(radar):
