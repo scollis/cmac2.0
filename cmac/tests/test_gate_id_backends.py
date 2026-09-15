@@ -7,6 +7,7 @@ depend on it.
 """
 
 import sys
+import warnings
 
 import numpy as np
 import pyart
@@ -217,6 +218,44 @@ def test_classification_radar_prefers_the_uncorrected_moments(radar):
     assert 'sounding_temperature' not in moment_fields
     # The caller's volume is untouched.
     assert 'uncorrected_reflectivity_h' in radar.fields
+
+
+def test_declined_volume_warns_rather_than_reading_as_clear_air():
+    """A skipped sweep must not fold silently into no_scatter.
+
+    radar_palette skips sweeps it judges unsuitable -- narrow-elevation-span
+    RHIs in the TRACER cell-tracking sequence, for instance -- and returns
+    unclassified for every gate in them.
+    """
+    from cmac.gate_id_backends import _report_unclassified
+
+    codes = np.zeros((10, 20), dtype='i2')  # all unclassified
+    meta = {'skipped_sweeps': [
+        {'sweep': 0, 'sweep_mode': 'rhi', 'elevation_span': 18.76}]}
+    with pytest.warns(UserWarning, match='unclassified'):
+        n_unclassified, skipped = _report_unclassified(codes, 0, meta, {})
+    assert n_unclassified == codes.size
+    assert len(skipped) == 1
+
+    with pytest.raises(RuntimeError, match='elevation span 18.8'):
+        _report_unclassified(codes, 0, meta,
+                             {'gate_id_unclassified_policy': 'error'})
+
+    with pytest.raises(ValueError, match='must be'):
+        _report_unclassified(codes, 0, meta,
+                             {'gate_id_unclassified_policy': 'shrug'})
+
+
+def test_classified_volume_does_not_warn():
+    from cmac.gate_id_backends import _report_unclassified
+
+    codes = np.full((10, 20), 5, dtype='i2')  # all light_rain
+    codes[0, :] = 0
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        n_unclassified, skipped = _report_unclassified(codes, 0, {}, {})
+    assert n_unclassified == 20
+    assert skipped == []
 
 
 def test_classification_radar_falls_back_to_the_config(radar):

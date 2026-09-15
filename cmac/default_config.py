@@ -1365,6 +1365,13 @@ _DEFAULT_PROCESSING_TUNABLES = {
     # to the configured fields, so the offsets are added to the classifier's
     # view of them. Set false to classify on the raw instrument values.
     'gate_id_apply_offsets': True,
+    # What to do when radar_palette declines to classify a volume -- it skips
+    # sweeps it judges unsuitable (a narrow-elevation-span RHI, for instance)
+    # and returns 'unclassified' for every gate in them, which folds to
+    # no_scatter and is then indistinguishable from clear air. 'warn' reports
+    # it and continues; 'error' makes it a hard failure, which is what a
+    # production run that must not emit an empty mask should use.
+    'gate_id_unclassified_policy': 'warn',
     'gate_id_snr_min': 3.0,
     'gate_id_min_run': 3,
     'gate_id_despeckle_keep_dbz': 30.0,

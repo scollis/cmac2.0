@@ -645,6 +645,15 @@ def cmac(radar, sonde, config, geotiff=None, flip_velocity=False,
             in sorted(gate_id_meta.get('classified_on', {}).items()))
         radar.metadata['gate_id_no_evidence_gates'] = int(
             gate_id_meta['n_no_evidence'])
+        # A volume the classifier declined folds to no_scatter, which reads as
+        # clear air, so the count and the reason travel with the file.
+        radar.metadata['gate_id_unclassified_gates'] = int(
+            gate_id_meta.get('n_unclassified', 0))
+        radar.metadata['gate_id_skipped_sweeps'] = '; '.join(
+            'sweep %s (%s, elevation span %.1f deg)'
+            % (entry.get('sweep'), entry.get('sweep_mode'),
+               float(entry.get('elevation_span', float('nan'))))
+            for entry in gate_id_meta.get('skipped_sweeps') or []) or 'none'
         if gate_id_meta.get('freezing_level_m') is not None:
             radar.metadata['gate_id_freezing_level_m'] = float(
                 np.round(gate_id_meta['freezing_level_m'], 2))

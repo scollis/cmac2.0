@@ -55,6 +55,7 @@ returned metadata as ``n_no_evidence``.
 """
 
 import copy
+import warnings
 
 import numpy as np
 
@@ -327,6 +328,59 @@ def build_classification_radar(radar, field_config, cmac_config=None):
     return classification_radar, moment_fields, resolved
 
 
+#: Fraction of gates left ``unclassified`` above which the run is reported as
+#: a classification failure rather than as a result. The classifier declines
+#: whole sweeps it judges unsuitable -- an RHI whose elevation span is too
+#: narrow, for instance -- and returns ``unclassified`` for every gate in
+#: them. Folded onto CMAC's categories that becomes ``no_scatter``, which is
+#: indistinguishable from clear air: the VAP would emit a file whose every
+#: masked product is empty, with nothing in it saying why. Measured on TRACER
+#: C-SAPR2 cell-tracking RHIs, where four volumes of 16 to 76 rays and
+#: elevation spans of 19 degrees were skipped in full.
+UNCLASSIFIED_WARN_FRACTION = 0.5
+
+
+def _report_unclassified(codes, unclassified_code, meta, cmac_config,
+                         verbose=False):
+    """Surface a classification the backend should not present as clear air.
+
+    Returns the count of ``unclassified`` gates and the classifier's list of
+    skipped sweeps. Raises or warns per ``gate_id_unclassified_policy``
+    ('warn', the default, or 'error' for a production run that should fail
+    rather than write an empty mask).
+    """
+    n_unclassified = int((codes == unclassified_code).sum())
+    fraction = n_unclassified / codes.size
+    skipped = list(meta.get('skipped_sweeps') or [])
+    if not skipped and fraction <= UNCLASSIFIED_WARN_FRACTION:
+        return n_unclassified, skipped
+
+    reasons = '; '.join(
+        'sweep %s (%s, elevation span %.1f deg)'
+        % (entry.get('sweep'), entry.get('sweep_mode'),
+           float(entry.get('elevation_span', float('nan'))))
+        for entry in skipped) or 'no sweep was reported as skipped'
+    message = (
+        "radar_palette left %d of %d gates (%.1f%%) unclassified: %s. Folded "
+        "onto CMAC's categories those gates become no_scatter, so every "
+        "masked product in this volume would be empty or near-empty without "
+        "saying why. Classify this volume with gate_id_method='cmac_fuzzy', "
+        "or set gate_id_unclassified_policy='error' to make this a hard "
+        "failure." % (n_unclassified, codes.size, 100.0 * fraction, reasons))
+
+    policy = cmac_config.get('gate_id_unclassified_policy', 'warn')
+    if policy == 'error':
+        raise RuntimeError(message)
+    if policy != 'warn':
+        raise ValueError(
+            "gate_id_unclassified_policy must be 'warn' or 'error', not %r"
+            % (policy,))
+    warnings.warn(message, UserWarning)
+    if verbose:
+        print('##    UNCLASSIFIED: %s' % reasons)
+    return n_unclassified, skipped
+
+
 def _no_evidence_mask(classification_radar, moment_fields):
     """Boolean mask of gates at which no measured moment is finite."""
     has_evidence = np.zeros(
@@ -499,6 +553,13 @@ def radar_palette_gate_id(radar, field_config, cmac_config, verbose=False):
     detail = classified.fields['scatterer_classification']
     codes = np.ma.filled(detail['data'], 0).astype('i2')
 
+    # Whether the classifier actually classified. Checked before the evidence
+    # guard and the fold, both of which turn unclassified gates into
+    # no_scatter and would hide a declined volume.
+    n_unclassified, skipped_sweeps = _report_unclassified(
+        codes, single.NAME_TO_CODE['unclassified'], meta, cmac_config,
+        verbose=verbose)
+
     # The evidence guard. See the module docstring: the classifier's own
     # coverage test is per-feature-key, not per-gate, so a gate with no
     # measurement at all can still carry a hydrometeor label.
@@ -552,6 +613,8 @@ def radar_palette_gate_id(radar, field_config, cmac_config, verbose=False):
 
     meta = dict(meta)
     meta['classified_on'] = resolved
+    meta['n_unclassified'] = n_unclassified
+    meta['skipped_sweeps'] = skipped_sweeps
     meta['n_no_evidence'] = n_no_evidence
     meta['fold_counts'] = fold_counts
     meta['freezing_level_m'] = freezing_level_m

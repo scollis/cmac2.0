@@ -262,6 +262,7 @@ radar needs to differ.
 | `gate_id_class_map` | `null` | Class name -> CMAC category, overriding the default fold for the classes named. Partial maps are merged over the default. Targets must be one of `multi_trip`, `rain`, `snow`, `no_scatter`, `melting`. |
 | `gate_id_freezing_level` | `null` | Freezing level in m MSL for the melting-layer constraints. `null` derives it from the mapped sounding, which is what a site with a sounding should use. |
 | `gate_id_apply_offsets` | `true` | Add `ref_offset` / `zdr_offset` to the uncorrected moments the classifier sees. See [Gate-ID backends](#gate-id-backends). |
+| `gate_id_unclassified_policy` | `warn` | What to do when the classifier declines a volume. `warn` reports and continues; `error` fails the run. See [Gate-ID backends](#gate-id-backends). |
 | `gate_id_snr_min` | `3.0` | Gates below this SNR are forced to `no_scatter` before scoring. `null` disables the test. |
 | `gate_id_min_run` | `3` | Class runs shorter than this many gates along a ray are dissolved. |
 | `gate_id_despeckle_keep_dbz` | `30.0` | Reflectivity at or above which a gate is never despeckled or gated out. |
@@ -358,6 +359,17 @@ Two behaviours of this backend are CMAC's own and worth knowing about:
   calibration is a property of the instrument, not a correction. Set
   `gate_id_apply_offsets: false` to classify on the raw values instead. A
   moment that fell back to the configured field is never offset twice.
+- **A volume the classifier declines is reported, not folded to clear air.**
+  `radar_palette` skips sweeps it judges unsuitable — a narrow-elevation-span
+  RHI, for example — and returns `unclassified` for every gate in them, which
+  folds onto `no_scatter` and is then indistinguishable from empty sky: every
+  masked product in the file would be empty with nothing saying why. When any
+  sweep is skipped, or more than half the gates come back `unclassified`, the
+  backend warns with the sweep numbers and elevation spans, and writes
+  `gate_id_unclassified_gates` and `gate_id_skipped_sweeps` to the file. Set
+  `gate_id_unclassified_policy: error` to make it a hard failure instead. Four
+  TRACER C-SAPR2 cell-tracking RHIs (16-76 rays, ~19 degree elevation span) hit
+  this; the fuzzy classifier handles them.
 - Spectrum width has no `field_names` key (CMAC's own classifier does not use
   it, `radar_palette` does), so it is probed for by name — `spectrum_width`
   on MDV and NEXRAD volumes, `spectral_width` on modern ARM CfRadial. Add a
