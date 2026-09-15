@@ -17,6 +17,7 @@ from .cmac_processing import (
     snow_rate, rain_rate, get_sys_phase, remove_sys_phase)
 from .config import (get_cmac_values, get_field_names, get_metadata,
                      get_zs_relationships, get_default_metadata)
+from .gate_id import append_gate_id_category
 from .gate_id_backends import radar_palette_gate_id
 from . import csu_kdp
 
@@ -237,39 +238,50 @@ def cmac(radar, sonde, config, geotiff=None, flip_velocity=False,
             "choices are 'cmac_fuzzy' (CMAC's own fuzzy classifier) and "
             "'radar_palette'." % (gate_id_method, config))
 
+    # The clutter and terrain-blockage categories are appended through
+    # append_gate_id_category, which is idempotent and returns the code to
+    # write. A volume carrying both a ground_clutter field and a vendor
+    # classification_mask used to get ',5:clutter' appended once for each,
+    # and because get_gate_id_categories reads a category's code from its
+    # position in the notes string, clutter then resolved to 6 while the
+    # gates had been set to 5.
     if 'ground_clutter' in radar.fields.keys():
-        # Adding fifth gate id, clutter.
         clutter_data = radar.fields['ground_clutter']['data']
-        gate_data = radar.fields['gate_id']['data'].copy()
-        radar.fields['gate_id']['data'][clutter_data == 1] = 5
-        notes = radar.fields['gate_id']['notes']
-        radar.fields['gate_id']['notes'] = notes + ',5:clutter'
-        radar.fields['gate_id']['valid_max'] = 5
-        radar.fields['gate_id']['valid_min'] = 0
-    
-    if 'classification_mask' in radar.fields.keys():
+        clutter_code = append_gate_id_category(
+            radar.fields['gate_id'], 'clutter')
+        radar.fields['gate_id']['data'][clutter_data == 1] = clutter_code
+
+    # The vendor classification_mask overlay is opt-out per radar because its
+    # semantics are not the same across instrument generations. On TRACER
+    # C-SAPR2 a1 volumes the mask equals 8 -- its 'clutter' bit, and nothing
+    # else -- at 171,560 of 171,600 gates, so this block relabels effectively
+    # the whole volume as clutter and no meteorological gate survives. ARM's
+    # own production CMAC output for the same volume carries no clutter code
+    # at all, so the overlay was not applied to that generation of data. On
+    # CACTI C-SAPR2 the same field is 0 over 94% of gates and the overlay
+    # behaves as intended, so the default stays on.
+    use_classification_mask = cmac_config.get('use_classification_mask', True)
+    if 'classification_mask' in radar.fields.keys() and use_classification_mask:
         clutter_data = radar.fields['classification_mask']['data']
         gate_data = radar.fields['gate_id']['data'].copy()
-        radar.fields['gate_id']['data'][clutter_data == 8] = 5
-        radar.fields['gate_id']['data'][clutter_data == 16] = 5
-        radar.fields['gate_id']['data'][clutter_data == 4] = 5
+        clutter_code = append_gate_id_category(
+            radar.fields['gate_id'], 'clutter')
+        radar.fields['gate_id']['data'][clutter_data == 8] = clutter_code
+        radar.fields['gate_id']['data'][clutter_data == 16] = clutter_code
+        radar.fields['gate_id']['data'][clutter_data == 4] = clutter_code
         radar.fields['gate_id']['data'][clutter_data == 1] = 0
         radar.fields['gate_id']['data'][clutter_data == 2] = 0
         radar.fields['gate_id']['data'][gate_data == 0] = 0
-        notes = radar.fields['gate_id']['notes']
-        radar.fields['gate_id']['notes'] = notes + ',5:clutter'
-        radar.fields['gate_id']['valid_max'] = 5
-        radar.fields['gate_id']['valid_min'] = 0
 
     cbb_threshold = cmac_config.get('cbb_blockage_threshold', 0.80)
     if geotiff is not None:
         pbb_all, cbb_all = beam_block(
             radar, geotiff, cmac_config['radar_height_offset'],
             cmac_config['beam_width'])
-        radar.fields['gate_id']['data'][cbb_all > cbb_threshold] = 6
-        notes = radar.fields['gate_id']['notes']
-        radar.fields['gate_id']['notes'] = notes + ',6:terrain_blockage'
-        radar.fields['gate_id']['valid_max'] = 6
+        blockage_code = append_gate_id_category(
+            radar.fields['gate_id'], 'terrain_blockage')
+        radar.fields['gate_id']['data'][
+            cbb_all > cbb_threshold] = blockage_code
 
         pbb_dict = pbb_to_dict(pbb_all)
         cbb_dict = cbb_to_dict(cbb_all)
@@ -283,10 +295,9 @@ def cmac(radar, sonde, config, geotiff=None, flip_velocity=False,
             sdiff = radar.fields['gate_id']['data'].shape[0] - cbb.shape[0]
             # pad the cbb gate to match the radar
             cbb = np.pad(cbb, ((0, sdiff), (0, 0)),  'maximum')
-        radar.fields['gate_id']['data'][cbb == 1] = 6
-        notes = radar.fields['gate_id']['notes']
-        radar.fields['gate_id']['notes'] = notes + ',6:terrain_blockage'
-        radar.fields['gate_id']['valid_max'] = 6
+        blockage_code = append_gate_id_category(
+            radar.fields['gate_id'], 'terrain_blockage')
+        radar.fields['gate_id']['data'][cbb == 1] = blockage_code
 
     cat_dict = {}
     for pair_str in radar.fields['gate_id']['notes'].split(','):

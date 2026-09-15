@@ -1330,6 +1330,12 @@ _DEFAULT_PROCESSING_TUNABLES = {
     'rain_rate_valid_max': 400,
     'snow_rate_valid_max': 500,
     'cbb_blockage_threshold': 0.80,
+    # Whether a vendor classification_mask field, when present, is allowed to
+    # relabel gates as clutter. True preserves the behaviour this overlay has
+    # always had. Set it false where the mask's clutter bit is set at
+    # essentially every gate, which is the case on TRACER C-SAPR2 a1 volumes
+    # and turns the whole volume into clutter; see cmac_radar.cmac.
+    'use_classification_mask': True,
     # Which classifier fills the gate_id field. 'cmac_fuzzy' is CMAC's own
     # five-class fuzzy scheme (cmac_processing.do_my_fuzz) and is the default
     # everywhere, so behaviour is unchanged unless a config asks otherwise.
