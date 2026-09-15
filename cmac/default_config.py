@@ -1330,6 +1330,41 @@ _DEFAULT_PROCESSING_TUNABLES = {
     'rain_rate_valid_max': 400,
     'snow_rate_valid_max': 500,
     'cbb_blockage_threshold': 0.80,
+    # Which classifier fills the gate_id field. 'cmac_fuzzy' is CMAC's own
+    # five-class fuzzy scheme (cmac_processing.do_my_fuzz) and is the default
+    # everywhere, so behaviour is unchanged unless a config asks otherwise.
+    # 'radar_palette' delegates to radar_palette.gateid's eleven-class
+    # classifier and folds the result onto the same five categories, keeping
+    # the full class set in the scatterer_classification field. See
+    # cmac.gate_id_backends.
+    'gate_id_method': 'cmac_fuzzy',
+    # The remaining gate_id_* keys are read only by the radar_palette backend.
+    # Each of the tuning knobs left as None takes that classifier's own
+    # documented default, so a value is pinned here only where CMAC has a
+    # reason to differ.
+    #
+    # Class name -> CMAC category, overriding
+    # gate_id_backends.RADAR_PALETTE_TO_CMAC for the classes named. Partial
+    # maps are merged over the default, so only the classes being rerouted
+    # need listing.
+    'gate_id_class_map': None,
+    # Freezing level in m MSL handed to the classifier's melting-layer
+    # constraints. None derives it from the mapped sounding, which is what a
+    # site with a sounding should use; pin a number only when the sounding is
+    # known to be unrepresentative.
+    'gate_id_freezing_level': None,
+    'gate_id_snr_min': 3.0,
+    'gate_id_min_run': 3,
+    'gate_id_despeckle_keep_dbz': 30.0,
+    # Velocity texture, as a fraction of the uniform-random-phase limit, above
+    # which a gate cannot be first-trip weather. Measured to be
+    # instrument-specific rather than universal, so it is exposed per radar;
+    # 0 disables the test, None takes radar_palette's own constant.
+    'gate_id_incoherent_frac': None,
+    'gate_id_texture_window': 4,
+    # The winning-minus-runner-up score is a useful diagnostic but doubles the
+    # classification storage in the output file, so publishing it is opt-in.
+    'gate_id_publish_margin': False,
 }
 
 # Plot-field vmin/vmax pairs used by the quicklooks

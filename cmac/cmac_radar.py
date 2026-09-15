@@ -17,6 +17,7 @@ from .cmac_processing import (
     snow_rate, rain_rate, get_sys_phase, remove_sys_phase)
 from .config import (get_cmac_values, get_field_names, get_metadata,
                      get_zs_relationships, get_default_metadata)
+from .gate_id_backends import radar_palette_gate_id
 from . import csu_kdp
 
 def cmac(radar, sonde, config, geotiff=None, flip_velocity=False,
@@ -201,16 +202,40 @@ def cmac(radar, sonde, config, geotiff=None, flip_velocity=False,
 
     # Specifically for dealing with the ingested C-SAPR2 data
 
-    my_fuzz, _ = do_my_fuzz(
-        radar, rhv_field, ncp_field, verbose=verbose,
-        tex_start=cmac_config.get('fuzzy_tex_start', 2.0),
-        tex_end=cmac_config.get('fuzzy_tex_end', 2.1),
-        custom_mbfs=cmac_config['mbfs'],
-        custom_hard_constraints=cmac_config['hard_const'],
-        median_size=cmac_config.get('fuzzy_score_median_size', (3, 4)))
+    # Which classifier fills gate_id is a per-radar configuration choice. Both
+    # backends publish the same five categories in the same order, documented
+    # in the field's notes attribute, because everything below this point --
+    # the dealiasing gates, the KDP and attenuation gates, and all three
+    # rain-rate estimators -- reads its gate selection from that one field.
+    gate_id_method = cmac_config.get('gate_id_method', 'cmac_fuzzy')
+    gate_id_meta = None
+    if gate_id_method == 'cmac_fuzzy':
+        my_fuzz, _ = do_my_fuzz(
+            radar, rhv_field, ncp_field, verbose=verbose,
+            tex_start=cmac_config.get('fuzzy_tex_start', 2.0),
+            tex_end=cmac_config.get('fuzzy_tex_end', 2.1),
+            custom_mbfs=cmac_config['mbfs'],
+            custom_hard_constraints=cmac_config['hard_const'],
+            median_size=cmac_config.get('fuzzy_score_median_size', (3, 4)))
 
-    radar.add_field('gate_id', my_fuzz,
-                    replace_existing=True)
+        radar.add_field('gate_id', my_fuzz,
+                        replace_existing=True)
+    elif gate_id_method == 'radar_palette':
+        gid, _categories, extra_fields, gate_id_meta = radar_palette_gate_id(
+            radar, field_config, cmac_config, verbose=verbose)
+        radar.add_field('gate_id', gid, replace_existing=True)
+        # The eleven-class classification, and optionally its score margin,
+        # travel alongside the folded field rather than replacing it.
+        for field_name, field_dict in extra_fields.items():
+            radar.add_field(field_name, field_dict, replace_existing=True)
+        if verbose:
+            for field_name in extra_fields:
+                print('##    %s' % field_name)
+    else:
+        raise ValueError(
+            "Unknown gate_id_method %r in the configuration for %r. Valid "
+            "choices are 'cmac_fuzzy' (CMAC's own fuzzy classifier) and "
+            "'radar_palette'." % (gate_id_method, config))
 
     if 'ground_clutter' in radar.fields.keys():
         # Adding fifth gate id, clutter.
@@ -584,6 +609,18 @@ def cmac(radar, sonde, config, geotiff=None, flip_velocity=False,
     radar.metadata.clear()
     radar.metadata.update(meta)
     radar.metadata['command_line'] = command_line
+    # Which classifier produced gate_id is not recoverable from the field
+    # itself once the categories have been folded, and every masked product in
+    # the file depends on it, so it is recorded as provenance.
+    radar.metadata['gate_id_method'] = gate_id_method
+    if gate_id_meta is not None:
+        radar.metadata['gate_id_temperature_source'] = str(
+            gate_id_meta.get('temp_source'))
+        radar.metadata['gate_id_no_evidence_gates'] = int(
+            gate_id_meta['n_no_evidence'])
+        if gate_id_meta.get('freezing_level_m') is not None:
+            radar.metadata['gate_id_freezing_level_m'] = float(
+                np.round(gate_id_meta['freezing_level_m'], 2))
     return radar
 
 
