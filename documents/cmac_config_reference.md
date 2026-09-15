@@ -368,8 +368,9 @@ Two behaviours of this backend are CMAC's own and worth knowing about:
   backend warns with the sweep numbers and elevation spans, and writes
   `gate_id_unclassified_gates` and `gate_id_skipped_sweeps` to the file. Set
   `gate_id_unclassified_policy: error` to make it a hard failure instead. Four
-  TRACER C-SAPR2 cell-tracking RHIs (16-76 rays, ~19 degree elevation span) hit
-  this; the fuzzy classifier handles them.
+  TRACER C-SAPR2 cell-tracking RHIs (16-76 rays, elevation spans of 3.7 to
+  18.8 degrees) hit this; the fuzzy classifier handles them, labelling 1,186 to
+  15,434 gates rain on three of the four.
 - Spectrum width has no `field_names` key (CMAC's own classifier does not use
   it, `radar_palette` does), so it is probed for by name — `spectrum_width`
   on MDV and NEXRAD volumes, `spectral_width` on modern ARM CfRadial. Add a
