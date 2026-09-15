@@ -17,7 +17,7 @@ from .cmac_processing import (
     snow_rate, rain_rate, get_sys_phase, remove_sys_phase)
 from .config import (get_cmac_values, get_field_names, get_metadata,
                      get_zs_relationships, get_default_metadata)
-from .gate_id import append_gate_id_category
+from .gate_id import append_gate_id_category, get_gate_id_categories
 from .gate_id_backends import radar_palette_gate_id
 from . import csu_kdp
 
@@ -467,10 +467,20 @@ def cmac(radar, sonde, config, geotiff=None, flip_velocity=False,
     radar.fields['height_over_iso0']['data'] -= iso0
     radar.fields['height_over_iso0']['long_name'] = 'Height of radar beam over freezing level'
     
+    # Gates the Z-PHI attenuation correction is allowed to work on. The
+    # melting layer is a valid radar return and belongs in the corrected
+    # reflectivity, so it is included alongside rain and snow -- previously
+    # this filter admitted gate_id 1 and 2 as bare literals, which excluded
+    # melting and also assumed the fuzzy classifier's category order. The
+    # codes now come from the field's own notes string, so either backend's
+    # category list resolves correctly.
+    phase_proc_categories = get_gate_id_categories(radar.fields['gate_id'])
     phase_proc_gates = pyart.filters.GateFilter(radar)
     phase_proc_gates.exclude_all()
-    phase_proc_gates.include_equal('gate_id', 1)
-    phase_proc_gates.include_equal('gate_id', 2)
+    for category in ('rain', 'melting', 'snow'):
+        code = phase_proc_categories.get(category)
+        if code is not None:
+            phase_proc_gates.include_equal('gate_id', code)
     phase_proc_gates.exclude_above(
         'corrected_specific_diff_phase',
         cmac_config.get('kdp_phase_proc_max', 10.0))

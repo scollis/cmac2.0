@@ -275,6 +275,24 @@ transfer between instruments: the fraction of precipitation gates
 C-band RHIs to 24.6% on an S-band NEXRAD volume. Treat it as a per-instrument
 calibration, not a universal constant.
 
+#### Which categories reach which product
+
+The `gate_id` field is the mask behind every masked product in the file, and
+each step includes a different set of categories:
+
+| Step | Categories included |
+|---|---|
+| Velocity dealiasing, velocity texture | `rain`, `melting`, `snow` |
+| Z-PHI attenuation correction, `corrected_reflectivity`, `specific_attenuation`, KDP filtering | `rain`, `melting`, `snow` |
+| `rain_rate_A`, `rain_rate_Kdp`, `rain_rate_Z` | `rain` |
+| `snow_rate_*` | `snow` |
+
+The melting layer is a valid radar return and is included in the Z-PHI
+correction, so `corrected_reflectivity` covers melting-layer gates. (Before
+this branch that filter admitted `gate_id` 1 and 2 as bare literals, which
+excluded melting and also assumed the fuzzy classifier's category order; the
+codes now come from the field's own `notes` string.)
+
 #### Gate-ID backends
 
 Both backends publish the same `gate_id` field with the same five categories
